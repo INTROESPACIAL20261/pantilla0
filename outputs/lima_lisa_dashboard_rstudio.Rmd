@@ -1,0 +1,162 @@
+---
+title: "Dashboard LISA - Distritos del Departamento de Lima"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+packages <- c("sf", "spdep", "dplyr", "leaflet", "htmltools", "knitr")
+missing <- packages[!packages %in% rownames(installed.packages())]
+if (length(missing) > 0) install.packages(missing, repos = "https://cloud.r-project.org")
+
+library(sf)
+library(spdep)
+library(dplyr)
+library(leaflet)
+library(htmltools)
+library(knitr)
+```
+
+# Data
+
+```{r data, message=FALSE, warning=FALSE}
+data_url <- "https://github.com/CienciaDeDatosEspacial/dataSets/raw/refs/heads/main/PERU/PeruMaps.gpkg"
+value_col <- "Educ_sec_comp2019_pct"
+alpha <- 0.05
+
+peru <- st_read(data_url, layer = "good_geom", quiet = TRUE)
+lima <- peru %>%
+  filter(toupper(DEPARTAMENTO) == "LIMA", !is.na(.data[[value_col]])) %>%
+  st_transform(4326)
+
+lima_proj <- st_transform(lima, 32718)
+nrow(lima)
+```
+
+# Vecindarios
+
+```{r neighborhoods}
+coords <- st_coordinates(st_centroid(lima_proj))
+
+queen_nb <- poly2nb(lima_proj, queen = TRUE)
+rook_nb <- poly2nb(lima_proj, queen = FALSE)
+knn4_nb <- knn2nb(knearneigh(coords, k = 4))
+
+nearest <- knearneigh(coords, k = 1)
+distance_threshold <- ceiling(max(unlist(nbdists(knn2nb(nearest), coords))) / 1000) * 1000
+distance_nb <- dnearneigh(coords, d1 = 0, d2 = distance_threshold)
+
+neighborhoods <- list(
+  "Queen / interseccion" = queen_nb,
+  "Rook / frontera compartida" = rook_nb,
+  "KNN 4 centroides" = knn4_nb,
+  "Banda distancia" = distance_nb
+)
+```
+
+# Calculo LISA
+
+```{r lisa}
+label_order <- c("1 hotOutlier", "2 hotSpot", "3 no_pattern", "4 coldSpot", "5 coldOutlier")
+colors <- c(
+  "1 hotOutlier" = "#b35806",
+  "2 hotSpot" = "#f1a340",
+  "3 no_pattern" = "#e6e6e6",
+  "4 coldSpot" = "#998ec3",
+  "5 coldOutlier" = "#542788"
+)
+
+clean_prefix <- function(x) {
+  x <- tolower(x)
+  x <- gsub("[^a-z0-9]+", "_", x)
+  gsub("^_|_$", "", x)
+}
+
+classify_lisa <- function(values, nb) {
+  lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+  lm <- localmoran_perm(values, lw, nsim = 999, zero.policy = TRUE)
+  z <- as.numeric(scale(values))
+  lag_z <- lag.listw(lw, z, zero.policy = TRUE)
+  p <- lm[, "Pr(z != E(Ii)) Sim"]
+
+  cls <- rep("3 no_pattern", length(values))
+  sig <- p <= alpha
+  cls[sig & z > 0 & lag_z > 0] <- "2 hotSpot"
+  cls[sig & z < 0 & lag_z < 0] <- "4 coldSpot"
+  cls[sig & z > 0 & lag_z < 0] <- "1 hotOutlier"
+  cls[sig & z < 0 & lag_z > 0] <- "5 coldOutlier"
+
+  list(label = factor(cls, levels = label_order), moran_i = lm[, "Ii"], p = p, n = card(nb))
+}
+
+results <- list()
+summary_rows <- list()
+
+for (nm in names(neighborhoods)) {
+  prefix <- clean_prefix(nm)
+  calc <- classify_lisa(lima[[value_col]], neighborhoods[[nm]])
+  temp <- lima
+  temp[[paste0(prefix, "_lisa")]] <- calc$label
+  temp[[paste0(prefix, "_moran_i")]] <- calc$moran_i
+  temp[[paste0(prefix, "_p")]] <- calc$p
+  temp[[paste0(prefix, "_n")]] <- calc$n
+  results[[prefix]] <- temp
+
+  counts <- table(factor(calc$label, levels = label_order))
+  summary_rows[[nm]] <- data.frame(
+    vecindario = ifelse(nm == "Banda distancia", paste0("Banda distancia ", distance_threshold / 1000, " km"), nm),
+    vecinos_promedio = mean(card(neighborhoods[[nm]])),
+    islas = sum(card(neighborhoods[[nm]]) == 0),
+    t(as.data.frame.matrix(t(counts))),
+    check.names = FALSE
+  )
+}
+
+summary_df <- bind_rows(summary_rows)
+kable(summary_df)
+```
+
+# Ultimo mapa LISA: solo Lima
+
+```{r last-map}
+make_map <- function(gdf, prefix, title) {
+  pal <- colorFactor(palette = colors, domain = label_order)
+  leaflet(gdf) %>%
+    addProviderTiles(providers$CartoDB.Positron) %>%
+    addPolygons(
+      color = "#303030",
+      weight = 0.35,
+      fillOpacity = 0.78,
+      fillColor = ~pal(.data[[paste0(prefix, "_lisa")]]),
+      label = ~HTML(paste0(
+        "<b>", DISTRITO, "</b><br>",
+        "Provincia: ", PROVINCIA, "<br>",
+        "Clase LISA: ", .data[[paste0(prefix, "_lisa")]], "<br>",
+        value_col, ": ", round(.data[[value_col]], 2), "<br>",
+        "p-value: ", round(.data[[paste0(prefix, "_p")]], 4), "<br>",
+        "Vecinos: ", .data[[paste0(prefix, "_n")]]
+      ))
+    ) %>%
+    addLegend(position = "bottomleft", pal = pal, values = label_order, title = title)
+}
+
+make_map(results$queen_interseccion, "queen_interseccion", "LISA Lima - Queen / interseccion")
+```
+
+# Dashboard: cuatro vecindarios
+
+La tabla anterior resalta las diferencias en conteos por clase LISA. Los mapas siguientes usan la misma data y la misma variable; solo cambia el cálculo de vecindarios.
+
+```{r dashboard, fig.height=8}
+make_map(results$queen_interseccion, "queen_interseccion", "Queen / interseccion")
+make_map(results$rook_frontera_compartida, "rook_frontera_compartida", "Rook / frontera compartida")
+make_map(results$knn_4_centroides, "knn_4_centroides", "KNN 4 centroides")
+make_map(results$banda_distancia, "banda_distancia", paste0("Banda distancia ", distance_threshold / 1000, " km"))
+```
+
+```{r export}
+write.csv(summary_df, "resumen_lisa_lima_4_vecindarios_r.csv", row.names = FALSE, fileEncoding = "UTF-8")
+```

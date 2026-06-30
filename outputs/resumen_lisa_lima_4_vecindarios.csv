@@ -1,0 +1,5 @@
+﻿vecindario,vecinos_promedio,islas,1 hotOutlier,2 hotSpot,3 no_pattern,4 coldSpot,5 coldOutlier
+Queen / interseccion,5.228070175438597,0,5,21,126,19,0
+Rook / frontera compartida,4.982456140350878,0,3,20,125,23,0
+KNN 4 centroides,4.0,0,5,19,131,16,0
+Banda distancia 27 km,12.678362573099415,0,8,44,85,33,1
